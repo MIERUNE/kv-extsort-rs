@@ -1,0 +1,15 @@
+[package]
+name = "external-sorter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = { version = "1.16.0" }
+crossbeam-channel = "0.5.13"
+rayon = "1.10.0"
+tempfile = "3.10.1"
+thiserror = "1.0.60"
+
+[dev-dependencies]
+rand = "0.8.5"
+
