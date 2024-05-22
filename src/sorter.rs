@@ -1,5 +1,5 @@
-use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
-use log::{info, warn};
+use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
+use log::{debug, warn};
 use std::sync::Arc;
 
 use bytemuck::Pod;
@@ -19,7 +19,7 @@ impl Default for SortConfig {
     fn default() -> Self {
         Self {
             max_memory: 1 << 30,
-            concurrency: num_cpus::get(),
+            concurrency: 8,
             merge_k: 16,
         }
     }
@@ -61,7 +61,7 @@ where
         Ok(chunk_dir) => Arc::new(chunk_dir),
         Err(e) => {
             let _ = output_tx.send(Err(e));
-            return SortedIter::new(output_rx);
+            return SortedIter::new(output_rx, None);
         }
     };
     let (file_chunk_tx, file_chunk_rx) = unbounded();
@@ -90,24 +90,30 @@ where
             });
     }
 
-    SortedIter::new(output_rx)
+    SortedIter::new(output_rx, Some(chunk_dir))
 }
 
-pub struct SortedIter<K> {
+pub struct SortedIter<K: Pod> {
     output_rx: Receiver<Result<(K, Vec<u8>)>>,
     done: bool,
+    #[allow(dead_code)]
+    chunk_dir: Option<Arc<FileChunkDir<K>>>,
 }
 
-impl<K> SortedIter<K> {
-    fn new(output_rx: Receiver<Result<(K, Vec<u8>)>>) -> Self {
+impl<K: Pod> SortedIter<K> {
+    fn new(
+        output_rx: Receiver<Result<(K, Vec<u8>)>>,
+        chunk_dir: Option<Arc<FileChunkDir<K>>>,
+    ) -> Self {
         SortedIter {
             output_rx,
+            chunk_dir,
             done: false,
         }
     }
 }
 
-impl<K> Iterator for SortedIter<K> {
+impl<K: Pod> Iterator for SortedIter<K> {
     type Item = Result<(K, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -187,74 +193,98 @@ fn start_merging_stage<K>(
     let (merged_tx, merged_rx) = unbounded::<Result<FileChunk<K>>>();
     let mut pending = Vec::new();
     let mut source_finished = false;
-    let mut merge_running = 0;
+    let mut num_running_merges = 0;
+
+    let mut recv_select = Select::new();
+    recv_select.recv(&chunk_rx); // 0
+    recv_select.recv(&merged_rx); // 1
 
     loop {
-        select! {
-            recv(chunk_rx) -> chunk_result => {
-                // Receive 1st gen chunks from sorting stage
-                match chunk_result {
-                    Ok(Ok(chunk)) => {
-                        info!("Received chunk: size={}", chunk.len());
-                        pending.push(chunk)
-                    }
-                    Ok(Err(e)) => {
-                        let _ = output_tx.send(Err(e));
-                        break;
-                    }
-                    Err(_) => source_finished = true,
+        let idx = recv_select.ready();
+        match idx {
+            // Receive chunks from the sorting stage
+            0 => match chunk_rx.try_recv() {
+                Ok(Ok(chunk)) => {
+                    debug!("Received chunk: size={}", chunk.len());
+                    pending.push(chunk)
                 }
-            }
-            recv(merged_rx) -> merge_result => {
-                // Receive merged chunks
-                match merge_result {
-                    Ok(Ok(chunk)) => {
-                        info!("Received merged chunk: size={}", chunk.len());
-                        merge_running -= 1;
-                        pending.push(chunk)
-                    }
-                    Ok(Err(e)) => {
-                        let _ = output_tx.send(Err(e));
-                        break;
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-
-        if pending.len() > config.merge_k {
-            pending.sort_by_key(|chunk| chunk.len());
-            let remaining = pending.split_off(config.merge_k);
-            let merging = std::mem::replace(&mut pending, remaining);
-
-            let merged_tx = merged_tx.clone();
-            let mut chunk_writer = match chunk_dir.add_chunk() {
-                Ok(chunk_writer) => chunk_writer,
-                Err(e) => {
+                Ok(Err(e)) => {
                     let _ = output_tx.send(Err(e));
                     break;
                 }
-            };
-
-            // Start merging
-            info!("Start merging {} chunks", merging.len());
-            merge_running += 1;
-            rayon::spawn(move || {
-                match merge_chunks(merging, |(key, value)| chunk_writer.push(&key, &value)) {
-                    Ok(()) => {
-                        let _ = merged_tx.send(Ok(chunk_writer.finalize()));
-                    }
-                    Err(e) => {
-                        let _ = merged_tx.send(Err(e));
-                    }
+                Err(_) => {
+                    debug!("All chunks received from the sorting stage");
+                    source_finished = true;
+                    recv_select.remove(0);
                 }
-            });
-        } else if source_finished && merge_running == 0 {
-            break;
+            },
+            // Receive merged chunks
+            1 => match merged_rx.try_recv() {
+                Ok(Ok(chunk)) => {
+                    debug!("Received merged chunk: size={}", chunk.len());
+                    num_running_merges -= 1;
+                    pending.push(chunk)
+                }
+                Ok(Err(e)) => {
+                    let _ = output_tx.send(Err(e));
+                    break;
+                }
+                Err(_) => {
+                    panic!("merged_rx should not be closed at this point")
+                }
+            },
+            _ => unreachable!(),
         }
+
+        // Plan to merge
+        let total_chunks = pending.len() + num_running_merges;
+        let num_merge = if source_finished {
+            if pending.len() > config.merge_k {
+                (total_chunks - config.merge_k + 1).min(config.merge_k)
+            } else if num_running_merges == 0 {
+                break;
+            } else {
+                continue;
+            }
+        } else if total_chunks >= config.merge_k * 2 - 1 {
+            if pending.len() >= config.merge_k {
+                config.merge_k
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+
+        pending.sort_by_key(|chunk| chunk.len());
+        let remaining = pending.split_off(num_merge.min(pending.len()));
+        let merging = std::mem::replace(&mut pending, remaining);
+
+        let merged_tx = merged_tx.clone();
+        let mut chunk_writer = match chunk_dir.add_chunk() {
+            Ok(chunk_writer) => chunk_writer,
+            Err(e) => {
+                let _ = output_tx.send(Err(e));
+                break;
+            }
+        };
+
+        // Start merging
+        debug!("Start merging {} chunks", merging.len());
+        num_running_merges += 1;
+        rayon::spawn(move || {
+            match merge_chunks(merging, |(key, value)| chunk_writer.push(&key, &value)) {
+                Ok(()) => {
+                    let _ = merged_tx.send(Ok(chunk_writer.finalize()));
+                }
+                Err(e) => {
+                    let _ = merged_tx.send(Err(e));
+                }
+            }
+        });
     }
 
-    info!("Start iteration (merging {} chunks)", pending.len());
+    debug!("Start iteration by merging {} chunks", pending.len());
     rayon::spawn(move || {
         merge_chunks(pending, |(key, value)| {
             let _ = output_tx.send(Ok((key, value)));
@@ -279,7 +309,7 @@ where
 
     let mut chunk_iters = chunks
         .into_iter()
-        .map(|chunk| Ok(chunk.iter(1 << 20)?.peekable()))
+        .map(|chunk| Ok(chunk.iter(1 << 21)?.peekable()))
         .collect::<Result<Vec<_>>>()?;
 
     loop {

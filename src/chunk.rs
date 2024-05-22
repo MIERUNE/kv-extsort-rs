@@ -99,7 +99,7 @@ where
     K: Pod,
 {
     pub fn new(path: PathBuf) -> Result<Self> {
-        let writer = BufWriter::with_capacity(1 << 20, File::create(&path)?);
+        let writer = BufWriter::with_capacity(1 << 21, File::create(&path)?);
         Ok(Self {
             path,
             writer,
