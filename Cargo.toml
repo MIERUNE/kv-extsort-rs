@@ -1,15 +1,20 @@
 [package]
-name = "external-sorter"
+name = "kv-extsort"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bytemuck = { version = "1.16.0" }
-crossbeam-channel = "0.5.13"
-rayon = "1.10.0"
-tempfile = "3.10.1"
-thiserror = "1.0.60"
+bytemuck = { version = "1.16" }
+crossbeam-channel = "0.5"
+log = "0.4"
+num_cpus = "1"
+rayon = "1.10"
+tempfile = "3.10"
+thiserror = "1.0"
 
 [dev-dependencies]
-rand = "0.8.5"
+env_logger = "0.11"
+rand = { version = "0.8", features = ["small_rng"] }
 
+[profile.release]
+lto = "fat"
