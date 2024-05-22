@@ -99,7 +99,7 @@ where
     K: Pod,
 {
     pub fn new(path: PathBuf) -> Result<Self> {
-        let writer = BufWriter::new(File::create(&path)?);
+        let writer = BufWriter::with_capacity(1 << 20, File::create(&path)?);
         Ok(Self {
             path,
             writer,
@@ -147,6 +147,10 @@ where
         }
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn iter(&self, capacity: usize) -> Result<FileChunkIter<K>> {
         let file = File::open(&self.path)?;
         let reader = BufReader::with_capacity(capacity, file);
@@ -189,10 +193,12 @@ where
         };
 
         let mut read = || {
-            let mut buf = [0u8; 4];
-            self.reader.read_exact(&mut buf)?;
-            let val_size = u32::from_ne_bytes(buf);
-            let mut value: Vec<u8> = vec![0; val_size as usize];
+            let val_size = {
+                let mut buf = [0u8; 4];
+                self.reader.read_exact(&mut buf)?;
+                u32::from_ne_bytes(buf) as usize
+            };
+            let mut value: Vec<u8> = vec![0; val_size];
             self.reader.read_exact(&mut value)?;
             Ok((key, value))
         };

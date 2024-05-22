@@ -3,7 +3,7 @@ mod sorter;
 
 use thiserror::Error;
 
-pub use sorter::ExternalSorter;
+pub use sorter::{sort, SortConfig};
 
 #[derive(Error, Debug)]
 pub enum Error {
