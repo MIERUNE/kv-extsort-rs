@@ -307,7 +307,7 @@ where
 
     let mut chunk_iters = chunks
         .into_iter()
-        .map(|chunk| Ok(chunk.iter(1 << 21)?.peekable()))
+        .map(|chunk| Ok(chunk.iter(1 << 20)?.peekable()))
         .collect::<Result<Vec<_>>>()?;
 
     loop {

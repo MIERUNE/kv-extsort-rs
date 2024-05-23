@@ -17,8 +17,10 @@ rand = { version = "0.8", features = ["small_rng"] }
 num_cpus = "1"
 rlimit = "0.10.1"
 ext-sort = { version = "0.1.4", features = ["memory-limit"] }
-serde = "1.0.202"
+serde = { version = "1.0.202", features = ["derive"] }
 bincode = { version = "2.0.0-rc.3", default-features = false, features = ["std", "serde"] }
+serde_bytes = "0.11.14"
+deepsize = "0.2.0"
 
 [profile.release]
 lto = "thin"

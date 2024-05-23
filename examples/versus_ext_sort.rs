@@ -1,10 +1,5 @@
-use std::{convert::Infallible, time::Instant};
-
-use kv_extsort::{Result, SortConfig};
-use log::{debug, error};
-use rand::{rngs::SmallRng, Rng, SeedableRng};
-
-mod sort {
+// for using ext-sort crate with bincode2
+mod ext_sort_chunk {
     use std::{fs, io, marker::PhantomData};
 
     use ext_sort::chunk::ExternalChunk;
@@ -58,16 +53,27 @@ mod sort {
             }
         }
     }
+
+    #[derive(serde::Serialize, serde::Deserialize, deepsize::DeepSizeOf)]
+    pub struct Item<K> {
+        pub key: K,
+        #[serde(with = "serde_bytes")]
+        pub value: Vec<u8>,
+    }
 }
 
-use sort::BincodeExternalChunk;
+use ext_sort_chunk::{BincodeExternalChunk, Item};
+use kv_extsort::{Result, SortConfig};
+use log::{debug, error};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
+use std::{convert::Infallible, time::Instant};
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    let merge_k = 12;
-    let size = 14_000_000;
-    let body_size = 128;
+    let merge_k = 16;
+    let size = 1_000_000;
+    let body_size = 4096;
     let concurrency = num_cpus::get();
     let max_mem = (concurrency + 1) * 256 * 1024 * 1024;
 
@@ -87,29 +93,56 @@ fn main() -> Result<()> {
         source
     };
 
-    // use ext_sort::{
-    //     buffer::mem::MemoryLimitedBufferBuilder, ExternalSorter, ExternalSorterBuilder,
-    // };
-    // use std::path;
-    // let sorter: ExternalSorter<
-    //     (i32, Vec<u8>),
-    //     Infallible,
-    //     MemoryLimitedBufferBuilder,
-    //     BincodeExternalChunk<_>,
-    // > = ExternalSorterBuilder::new()
-    //     .with_tmp_dir(path::Path::new("./"))
-    //     .with_buffer(MemoryLimitedBufferBuilder::new(256 * 1024 * 1024))
-    //     .with_threads_number(num_cpus::get())
-    //     .build()
-    //     .unwrap();
+    use ext_sort::{
+        buffer::mem::MemoryLimitedBufferBuilder, ExternalSorter, ExternalSorterBuilder,
+    };
+    use std::path;
+    let sorter: ExternalSorter<
+        Item<i32>,
+        Infallible,
+        MemoryLimitedBufferBuilder,
+        BincodeExternalChunk<_>,
+    > = ExternalSorterBuilder::new()
+        .with_rw_buf_size(1 << 20)
+        .with_tmp_dir(path::Path::new("./"))
+        .with_buffer(MemoryLimitedBufferBuilder::new(256 * 1024 * 1024))
+        .with_threads_number(num_cpus::get() + 1)
+        .build()
+        .unwrap();
 
-    // println!("ext-sort");
-    // let t = Instant::now();
-    // sorter
-    //     .sort_by(make_iter().map(Ok), |a, b| a.0.cmp(&b.0))
-    //     .unwrap();
-    // println!("ext-sort: {:?}", t.elapsed());
+    println!("ext-sort");
+    {
+        let t = Instant::now();
+        let mut prev_key = None;
+        let mut count = 0;
+        for res in sorter
+            .sort_by(
+                make_iter().map(|(key, value)| Ok(Item { key, value })),
+                |a, b| a.key.cmp(&b.key),
+            )
+            .unwrap()
+        {
+            match res {
+                Ok(item) => {
+                    // validate if sorted
+                    count += 1;
+                    if let Some(p) = prev_key {
+                        assert!(p <= item.key);
+                        prev_key = Some(item.key);
+                    }
+                }
+                Err(e) => {
+                    error!("{:?}", e);
+                    break;
+                }
+            }
+        }
+        debug!("count: {count}");
+        assert!(count == size, "count: {} != size: {}", count, size);
+        debug!("Time elapsed: {:?}", t.elapsed());
+    }
 
+    println!("kv-extsort");
     {
         let t = Instant::now();
         let config = SortConfig::new()
@@ -135,6 +168,7 @@ fn main() -> Result<()> {
                 }
             }
         }
+        debug!("count: {count}");
         assert!(count == size, "count: {} != size: {}", count, size);
         debug!("Time elapsed: {:?}", t.elapsed());
     }
