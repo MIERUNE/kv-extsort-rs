@@ -1,8 +1,10 @@
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{self, AtomicUsize};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read, Write},
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    sync::atomic::{self, AtomicUsize},
+};
 
 use bytemuck::Pod;
 use tempfile::{tempdir, TempDir};
@@ -16,7 +18,7 @@ impl<K> MemChunk<K> {
     where
         K: Ord + Copy,
     {
-        data.sort_by_key(|(key, _value)| *key);
+        data.sort_unstable_by_key(|(key, _value)| *key);
         MemChunk(data)
     }
 

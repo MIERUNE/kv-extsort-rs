@@ -1,9 +1,8 @@
 mod chunk;
 mod sorter;
 
-use thiserror::Error;
-
 pub use sorter::{sort, SortConfig};
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {

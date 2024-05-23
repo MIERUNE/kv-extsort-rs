@@ -18,4 +18,4 @@ num_cpus = "1"
 rlimit = "0.10.1"
 
 [profile.release]
-lto = "fat"
+lto = "thin"
