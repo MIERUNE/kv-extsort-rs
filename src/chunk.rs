@@ -62,6 +62,7 @@ where
     temp_dir: TempDir,
     count: AtomicUsize,
     key_type: PhantomData<K>,
+    buf_writer_capacity: usize,
 }
 
 impl<K> FileChunkDir<K>
@@ -73,6 +74,7 @@ where
             temp_dir: tempdir()?,
             count: AtomicUsize::new(0),
             key_type: PhantomData,
+            buf_writer_capacity: 1 << 20,
         })
     }
 
@@ -82,7 +84,7 @@ where
             self.count.fetch_add(1, atomic::Ordering::Relaxed)
         ));
 
-        FileChunkWriter::new(path)
+        FileChunkWriter::new(path, self.buf_writer_capacity)
     }
 }
 
@@ -100,8 +102,8 @@ impl<K> FileChunkWriter<K>
 where
     K: Pod,
 {
-    pub fn new(path: PathBuf) -> Result<Self> {
-        let writer = BufWriter::with_capacity(1 << 21, File::create(&path)?);
+    pub fn new(path: PathBuf, capacity: usize) -> Result<Self> {
+        let writer = BufWriter::with_capacity(capacity, File::create(&path)?);
         Ok(Self {
             path,
             writer,
