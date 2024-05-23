@@ -1,17 +1,18 @@
-use log::{debug, error};
-use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::time::Instant;
 
 use kv_extsort::{Result, SortConfig};
+use log::{debug, error};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 fn main() -> Result<()> {
     env_logger::init();
 
     let mut rng = SmallRng::from_entropy();
-    let size = 12_000_000;
+    let size = 14_000_000;
     let body_size = 128;
-    let max_mem = 1_000_000_000;
-    let merge_k = 8;
+    let merge_k = 9;
+    let concurrency = num_cpus::get();
+    let max_mem = (concurrency + 1) * 256_000_000;
 
     let source_iter = {
         type T = (i32, Vec<u8>);
@@ -32,7 +33,7 @@ fn main() -> Result<()> {
         let t = Instant::now();
         let config = SortConfig::new()
             .max_memory(max_mem)
-            .concurrency(num_cpus::get())
+            .concurrency(concurrency)
             .merge_k(merge_k);
 
         let mut prev_key = None;

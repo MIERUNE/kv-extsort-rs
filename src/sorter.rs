@@ -1,8 +1,8 @@
-use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
-use log::{debug, warn};
 use std::sync::Arc;
 
 use bytemuck::Pod;
+use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
+use log::{debug, warn};
 
 use crate::{
     chunk::{FileChunk, FileChunkDir, MemChunk},
@@ -54,9 +54,9 @@ pub fn sort<K>(
     config: SortConfig,
 ) -> SortedIter<K>
 where
-    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    K: Ord + Pod + Copy + Send + Sync,
 {
-    let (output_tx, output_rx) = bounded(config.concurrency * 4);
+    let (output_tx, output_rx) = bounded(config.concurrency * 16);
     let chunk_dir = match FileChunkDir::<K>::new() {
         Ok(chunk_dir) => Arc::new(chunk_dir),
         Err(e) => {
@@ -67,26 +67,16 @@ where
     let (file_chunk_tx, file_chunk_rx) = unbounded();
     let chunk_dir = chunk_dir.clone();
 
-    // Stage 1: In-memory sort and write to disk
     {
         let chunk_dir = chunk_dir.clone();
         rayon::ThreadPoolBuilder::new()
+            .num_threads(config.concurrency + 1)
             .use_current_thread()
             .build()
             .unwrap()
             .install(|| {
-                start_sorting_stage(&config, source, chunk_dir, file_chunk_tx);
-            });
-    }
-
-    // Stage 2: Merge file chunks
-    {
-        let chunk_dir = chunk_dir.clone();
-        rayon::ThreadPoolBuilder::new()
-            .build()
-            .unwrap()
-            .install(|| {
-                start_merging_stage(&config, file_chunk_rx, chunk_dir, output_tx);
+                start_sorting_stage(&config, source, chunk_dir.clone(), file_chunk_tx);
+                start_merging_stage(&config, file_chunk_rx, chunk_dir.clone(), output_tx);
             });
     }
 
@@ -140,8 +130,10 @@ fn start_sorting_stage<K>(
     chunk_dir: Arc<FileChunkDir<K>>,
     chunk_tx: Sender<Result<FileChunk<K>>>,
 ) where
-    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    K: Ord + Pod + Copy + Send + Sync,
 {
+    debug!("Sorting stage started.");
+
     let chunk_max_size = config.max_memory / (config.concurrency + 1);
 
     let item_header_size = std::mem::size_of::<Vec<u8>>();
@@ -188,8 +180,10 @@ fn start_merging_stage<K>(
     chunk_dir: Arc<FileChunkDir<K>>,
     output_tx: Sender<Result<(K, Vec<u8>)>>,
 ) where
-    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    K: Ord + Pod + Copy + Send + Sync,
 {
+    debug!("Merging stage started.");
+
     let (merged_tx, merged_rx) = unbounded::<Result<FileChunk<K>>>();
     let mut pending = Vec::new();
     let mut source_finished = false;
@@ -205,7 +199,7 @@ fn start_merging_stage<K>(
             // Receive chunks from the sorting stage
             0 => match chunk_rx.try_recv() {
                 Ok(Ok(chunk)) => {
-                    debug!("Received chunk: size={}", chunk.len());
+                    debug!("Received chunk: items={}", chunk.len());
                     pending.push(chunk)
                 }
                 Ok(Err(e)) => {
@@ -221,7 +215,7 @@ fn start_merging_stage<K>(
             // Receive merged chunks
             1 => match merged_rx.try_recv() {
                 Ok(Ok(chunk)) => {
-                    debug!("Received merged chunk: size={}", chunk.len());
+                    debug!("Received merged chunk: items={}", chunk.len());
                     num_running_merges -= 1;
                     pending.push(chunk)
                 }
@@ -244,6 +238,10 @@ fn start_merging_stage<K>(
             } else if num_running_merges == 0 {
                 break;
             } else {
+                println!(
+                    "{} total={total_chunks} running={num_running_merges}",
+                    pending.len()
+                );
                 continue;
             }
         } else if total_chunks >= config.merge_k * 2 - 1 {
