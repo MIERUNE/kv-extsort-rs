@@ -14,7 +14,7 @@ pub struct SortConfig {
     pub(crate) max_chunk_bytes: usize,
     pub(crate) concurrency: usize,
     pub(crate) merge_k: usize,
-    pub(crate) canceled: AtomicBool,
+    pub(crate) canceled: Arc<AtomicBool>,
 }
 
 impl Default for SortConfig {
@@ -23,7 +23,7 @@ impl Default for SortConfig {
             max_chunk_bytes: 1 << 30,
             concurrency: 8,
             merge_k: 16,
-            canceled: AtomicBool::new(false),
+            canceled: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -31,6 +31,22 @@ impl Default for SortConfig {
 impl SortConfig {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    pub fn set_cancel_flag(self, canceled: Arc<AtomicBool>) -> Self {
+        Self { canceled, ..self }
+    }
+
+    pub fn get_cancel_flag(&self) -> Arc<AtomicBool> {
+        self.canceled.clone()
+    }
+
+    pub(crate) fn ensure_not_canceled(&self) -> Result<()> {
+        if self.canceled.load(std::sync::atomic::Ordering::Relaxed) {
+            Err(crate::Error::Canceled)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn max_chunk_bytes(self, max_chunk_bytes: usize) -> Self {
@@ -163,6 +179,10 @@ fn start_sorting_stage<K>(
             let buffer = std::mem::take(&mut buffer);
             let chunk_dir = chunk_dir.clone();
             let chunk_tx = chunk_tx.clone();
+            if let Err(e) = config.ensure_not_canceled() {
+                let _ = chunk_tx.send(Err(e));
+                return;
+            }
             rayon::spawn(move || {
                 let _ = chunk_tx.send(mem_to_file_chunk(buffer, chunk_dir));
             });
@@ -174,6 +194,10 @@ fn start_sorting_stage<K>(
 
     // last chunk
     if !buffer.is_empty() {
+        if let Err(e) = config.ensure_not_canceled() {
+            let _ = chunk_tx.send(Err(e));
+            return;
+        }
         rayon::spawn(move || {
             let _ = chunk_tx.send(mem_to_file_chunk(buffer, chunk_dir));
         });
@@ -236,6 +260,10 @@ fn start_merging_stage<K>(
             _ => unreachable!(),
         }
 
+        if let Err(e) = config.ensure_not_canceled() {
+            let _ = output_tx.send(Err(e));
+        }
+
         // Plan to merge
         let total_chunks = pending.len() + num_running_merges;
         let num_merge = if source_finished {
@@ -272,8 +300,9 @@ fn start_merging_stage<K>(
         // Start merging
         debug!("Start merging {} chunks", merging.len());
         num_running_merges += 1;
+        let canceled = config.canceled.clone();
         rayon::spawn(move || {
-            match merge_chunks_with_binary_heap(merging, |(key, value)| {
+            match merge_chunks_with_binary_heap(canceled, merging, |(key, value)| {
                 chunk_writer.push(&key, &value)
             }) {
                 Ok(()) => {
@@ -287,8 +316,9 @@ fn start_merging_stage<K>(
     }
 
     debug!("Start iteration by merging {} chunks", pending.len());
+    let canceled = config.canceled.clone();
     rayon::spawn(move || {
-        if let Err(e) = merge_chunks_with_binary_heap(pending, |(key, value)| {
+        if let Err(e) = merge_chunks_with_binary_heap(canceled, pending, |(key, value)| {
             let _ = output_tx.send(Ok((key, value)));
             Ok(())
         }) {
@@ -296,76 +326,4 @@ fn start_merging_stage<K>(
         }
         drop(chunk_dir);
     });
-}
-
-#[allow(dead_code)]
-fn merge_chunks_by_naive_picking<K>(
-    chunks: Vec<FileChunk<K>>,
-    mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
-) -> Result<()>
-where
-    K: Ord + Pod + Copy + Send + Sync,
-{
-    let tmp_file_paths = chunks
-        .iter()
-        .map(|chunk| chunk.path().to_owned())
-        .collect::<Vec<_>>();
-
-    let mut chunk_iters = chunks
-        .into_iter()
-        .map(|chunk| Ok(chunk.iter()?.peekable()))
-        .collect::<Result<Vec<_>>>()?;
-
-    loop {
-        let mut min_key = None;
-        let mut min_key_idx = None;
-        let mut found_ranout = false;
-
-        for (idx, iter) in chunk_iters.iter_mut().enumerate() {
-            match iter.peek() {
-                Some(Ok((key, _))) => {
-                    if min_key.is_none()
-                        || key < min_key.as_ref().expect("min_key should have value")
-                    {
-                        min_key = Some(*key);
-                        min_key_idx = Some(idx);
-                    }
-                }
-                Some(Err(_)) => {
-                    min_key_idx = Some(idx);
-                    break;
-                }
-                None => {
-                    found_ranout = true;
-                }
-            }
-        }
-
-        if let Some(min_key_idx) = min_key_idx {
-            match chunk_iters[min_key_idx].next() {
-                Some(Ok((key, value))) => {
-                    add_fn((key, value))?;
-                }
-                Some(Err(e)) => {
-                    return Err(e);
-                }
-                None => unreachable!(),
-            }
-        } else {
-            break;
-        }
-
-        if found_ranout {
-            // remove ran-out iterators
-            chunk_iters.retain_mut(|it| it.peek().is_some());
-        }
-    }
-
-    for path in tmp_file_paths {
-        if std::fs::remove_file(&path).is_err() {
-            warn!("Failed to remove file: {:?}", path);
-        }
-    }
-
-    Ok(())
 }

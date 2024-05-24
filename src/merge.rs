@@ -1,12 +1,16 @@
-use std::collections::BinaryHeap;
+use std::{
+    collections::BinaryHeap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use bytemuck::Pod;
 use log::warn;
 
-use crate::{chunk::FileChunk, Result};
+use crate::{chunk::FileChunk, Result, SortConfig};
 
 #[allow(dead_code)]
 pub fn merge_chunks_by_naive_picking<K>(
+    canceled: Arc<AtomicBool>,
     chunks: Vec<FileChunk<K>>,
     mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
 ) -> Result<()>
@@ -27,6 +31,10 @@ where
         let mut min_key = None;
         let mut min_key_idx = None;
         let mut found_ranout = false;
+
+        if canceled.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
 
         for (idx, iter) in chunk_iters.iter_mut().enumerate() {
             match iter.peek() {
@@ -74,7 +82,10 @@ where
         }
     }
 
-    Ok(())
+    match canceled.load(std::sync::atomic::Ordering::Relaxed) {
+        false => Ok(()),
+        true => Err(crate::Error::Canceled),
+    }
 }
 
 struct HeapItem<K: Ord> {
@@ -104,6 +115,7 @@ impl<K: Ord> PartialEq for HeapItem<K> {
 }
 
 pub fn merge_chunks_with_binary_heap<K>(
+    canceled: Arc<AtomicBool>,
     chunks: Vec<FileChunk<K>>,
     mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
 ) -> Result<()>
@@ -137,6 +149,10 @@ where
     }
 
     loop {
+        if canceled.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
         let Some(&HeapItem { iter_idx, .. }) = heap.peek() else {
             break;
         };
@@ -163,5 +179,8 @@ where
         }
     }
 
-    Ok(())
+    match canceled.load(std::sync::atomic::Ordering::Relaxed) {
+        false => Ok(()),
+        true => Err(crate::Error::Canceled),
+    }
 }

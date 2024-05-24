@@ -93,25 +93,25 @@ fn main() -> Result<()> {
         source
     };
 
-    use ext_sort::{
-        buffer::mem::MemoryLimitedBufferBuilder, ExternalSorter, ExternalSorterBuilder,
-    };
-    use std::path;
-    let sorter: ExternalSorter<
-        Item<i32>,
-        Infallible,
-        MemoryLimitedBufferBuilder,
-        BincodeExternalChunk<_>,
-    > = ExternalSorterBuilder::new()
-        .with_rw_buf_size(1 << 20)
-        .with_tmp_dir(path::Path::new("./"))
-        .with_buffer(MemoryLimitedBufferBuilder::new(max_chunk_size as u64))
-        .with_threads_number(num_cpus::get() + 1)
-        .build()
-        .unwrap();
-
     println!("ext-sort");
     {
+        use ext_sort::{
+            buffer::mem::MemoryLimitedBufferBuilder, ExternalSorter, ExternalSorterBuilder,
+        };
+        use std::path;
+        let sorter: ExternalSorter<
+            Item<i32>,
+            Infallible,
+            MemoryLimitedBufferBuilder,
+            BincodeExternalChunk<_>,
+        > = ExternalSorterBuilder::new()
+            .with_rw_buf_size(1 << 20)
+            .with_tmp_dir(path::Path::new("./"))
+            .with_buffer(MemoryLimitedBufferBuilder::new(max_chunk_size as u64))
+            .with_threads_number(num_cpus::get() + 1)
+            .build()
+            .unwrap();
+
         let t = Instant::now();
         let mut prev_key = None;
         let mut count = 0;
@@ -149,6 +149,13 @@ fn main() -> Result<()> {
             .max_chunk_bytes(max_chunk_size)
             .concurrency(concurrency)
             .merge_k(merge_k);
+
+        let canceled = config.get_cancel_flag();
+
+        ctrlc::set_handler(move || {
+            canceled.store(true, std::sync::atomic::Ordering::Relaxed);
+        })
+        .expect("Error setting Ctrl-C handler");
 
         let mut prev_key = None;
         let mut count = 0;
