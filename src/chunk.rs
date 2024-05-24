@@ -26,7 +26,7 @@ impl<K> MemChunk<K> {
         self.0.len()
     }
 
-    pub fn write_to_file(&self, writer: &mut FileChunkWriter<K>) -> Result<()>
+    pub fn write_to_file<E>(&self, writer: &mut FileChunkWriter<K>) -> Result<(), E>
     where
         K: Ord + Pod,
     {
@@ -69,7 +69,7 @@ impl<K> FileChunkDir<K>
 where
     K: Pod,
 {
-    pub fn new() -> Result<Self> {
+    pub fn new<E>() -> Result<Self, E> {
         Ok(Self {
             temp_dir: tempdir()?,
             count: AtomicUsize::new(0),
@@ -78,7 +78,7 @@ where
         })
     }
 
-    pub fn add_chunk(&self) -> Result<FileChunkWriter<K>> {
+    pub fn add_chunk<E>(&self) -> Result<FileChunkWriter<K>, E> {
         let path = self.temp_dir.path().join(format!(
             "{}",
             self.count.fetch_add(1, atomic::Ordering::Relaxed)
@@ -102,7 +102,7 @@ impl<K> FileChunkWriter<K>
 where
     K: Pod,
 {
-    pub fn new(path: PathBuf, capacity: usize) -> Result<Self> {
+    pub fn new<E>(path: PathBuf, capacity: usize) -> Result<Self, E> {
         let writer = BufWriter::with_capacity(capacity, File::create(&path)?);
         Ok(Self {
             path,
@@ -116,7 +116,7 @@ where
         &self.path
     }
 
-    pub fn push(&mut self, key: &K, value: &[u8]) -> Result<()> {
+    pub fn push<E>(&mut self, key: &K, value: &[u8]) -> Result<(), E> {
         let key_bin = bytemuck::bytes_of(key);
         self.writer.write_all(key_bin)?;
         self.writer.write_all(&(value.len() as u32).to_ne_bytes())?;
@@ -155,12 +155,13 @@ where
         &self.path
     }
 
-    pub fn iter(&self) -> Result<FileChunkIter<K>> {
+    pub fn iter<E>(&self) -> Result<FileChunkIter<K, E>, E> {
         let file = File::open(&self.path)?;
         let reader = BufReader::with_capacity(1 << 20, file);
         Ok(FileChunkIter {
             reader,
             key_type: PhantomData,
+            error_type: PhantomData,
         })
     }
 
@@ -169,19 +170,20 @@ where
     }
 }
 
-pub struct FileChunkIter<K>
+pub struct FileChunkIter<K, E>
 where
     K: Pod,
 {
     reader: BufReader<File>,
     key_type: PhantomData<K>,
+    error_type: PhantomData<E>,
 }
 
-impl<K> Iterator for FileChunkIter<K>
+impl<K, E> Iterator for FileChunkIter<K, E>
 where
     K: Pod,
 {
-    type Item = Result<(K, Vec<u8>)>;
+    type Item = Result<(K, Vec<u8>), E>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut key = K::zeroed();
