@@ -72,10 +72,10 @@ fn main() -> Result<()> {
     env_logger::init();
 
     let merge_k = 16;
-    let size = 1_000_000;
-    let body_size = 4096;
+    let size = 2_000_000;
+    let body_size = 2046;
     let concurrency = num_cpus::get();
-    let max_mem = (concurrency + 1) * 256 * 1024 * 1024;
+    let max_chunk_size = 64 * 1024 * 1024;
 
     let make_iter = || {
         let mut rng = SmallRng::from_entropy();
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
     > = ExternalSorterBuilder::new()
         .with_rw_buf_size(1 << 20)
         .with_tmp_dir(path::Path::new("./"))
-        .with_buffer(MemoryLimitedBufferBuilder::new(256 * 1024 * 1024))
+        .with_buffer(MemoryLimitedBufferBuilder::new(max_chunk_size as u64))
         .with_threads_number(num_cpus::get() + 1)
         .build()
         .unwrap();
@@ -146,7 +146,7 @@ fn main() -> Result<()> {
     {
         let t = Instant::now();
         let config = SortConfig::new()
-            .max_memory(max_mem)
+            .max_chunk_bytes(max_chunk_size)
             .concurrency(concurrency)
             .merge_k(merge_k);
 

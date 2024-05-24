@@ -1,8 +1,8 @@
-# external-sorter-poc
+# kv-extsort-rs
 
-Work in progress
+A simple external sort library for key-value datasets.
 
-外部ソート用ライブラリを作る (主にはnusamai用) 
+Work in progress.
 
 ### 求めるもの
 

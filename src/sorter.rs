@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::BinaryHeap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use bytemuck::Pod;
 use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
@@ -10,17 +13,19 @@ use crate::{
 };
 
 pub struct SortConfig {
-    pub(crate) max_memory: usize,
+    pub(crate) max_chunk_bytes: usize,
     pub(crate) concurrency: usize,
     pub(crate) merge_k: usize,
+    pub(crate) canceled: AtomicBool,
 }
 
 impl Default for SortConfig {
     fn default() -> Self {
         Self {
-            max_memory: 1 << 30,
+            max_chunk_bytes: 1 << 30,
             concurrency: 8,
             merge_k: 16,
+            canceled: AtomicBool::new(false),
         }
     }
 }
@@ -30,9 +35,15 @@ impl SortConfig {
         Default::default()
     }
 
-    pub fn max_memory(self, max_memory: usize) -> Self {
-        assert!(max_memory > 0, "max_memory must be greater than 0");
-        Self { max_memory, ..self }
+    pub fn max_chunk_bytes(self, max_chunk_bytes: usize) -> Self {
+        assert!(
+            max_chunk_bytes > 0,
+            "max_chunk_bytes must be greater than 0"
+        );
+        Self {
+            max_chunk_bytes,
+            ..self
+        }
     }
 
     pub fn concurrency(self, concurrency: usize) -> Self {
@@ -54,7 +65,7 @@ pub fn sort<K>(
     config: SortConfig,
 ) -> SortedIter<K>
 where
-    K: Ord + Pod + Copy + Send + Sync,
+    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
 {
     let (output_tx, output_rx) = bounded(config.concurrency * 16);
     let chunk_dir = match FileChunkDir::<K>::new() {
@@ -71,7 +82,6 @@ where
         let chunk_dir = chunk_dir.clone();
         rayon::ThreadPoolBuilder::new()
             .num_threads(config.concurrency + 1)
-            .use_current_thread()
             .build()
             .unwrap()
             .install(|| {
@@ -134,8 +144,6 @@ fn start_sorting_stage<K>(
 {
     debug!("Sorting stage started.");
 
-    let chunk_max_size = config.max_memory / (config.concurrency + 1);
-
     let item_header_size = std::mem::size_of::<Vec<u8>>();
     let mut chunk_size = 0;
 
@@ -153,7 +161,7 @@ fn start_sorting_stage<K>(
 
     for (key, value) in source {
         let item_size = item_header_size + value.len();
-        if chunk_size + item_size >= chunk_max_size {
+        if chunk_size + item_size >= config.max_chunk_bytes {
             let buffer = std::mem::take(&mut buffer);
             let chunk_dir = chunk_dir.clone();
             let chunk_tx = chunk_tx.clone();
@@ -180,7 +188,7 @@ fn start_merging_stage<K>(
     chunk_dir: Arc<FileChunkDir<K>>,
     output_tx: Sender<Result<(K, Vec<u8>)>>,
 ) where
-    K: Ord + Pod + Copy + Send + Sync,
+    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
 {
     debug!("Merging stage started.");
 
@@ -238,10 +246,6 @@ fn start_merging_stage<K>(
             } else if num_running_merges == 0 {
                 break;
             } else {
-                println!(
-                    "{} total={total_chunks} running={num_running_merges}",
-                    pending.len()
-                );
                 continue;
             }
         } else if total_chunks >= config.merge_k * 2 - 1 {
@@ -271,7 +275,9 @@ fn start_merging_stage<K>(
         debug!("Start merging {} chunks", merging.len());
         num_running_merges += 1;
         rayon::spawn(move || {
-            match merge_chunks(merging, |(key, value)| chunk_writer.push(&key, &value)) {
+            match merge_chunks_with_binary_heap(merging, |(key, value)| {
+                chunk_writer.push(&key, &value)
+            }) {
                 Ok(()) => {
                     let _ = merged_tx.send(Ok(chunk_writer.finalize()));
                 }
@@ -284,16 +290,18 @@ fn start_merging_stage<K>(
 
     debug!("Start iteration by merging {} chunks", pending.len());
     rayon::spawn(move || {
-        merge_chunks(pending, |(key, value)| {
+        if let Err(e) = merge_chunks_with_binary_heap(pending, |(key, value)| {
             let _ = output_tx.send(Ok((key, value)));
             Ok(())
-        })
-        .unwrap();
+        }) {
+            let _ = merged_tx.send(Err(e));
+        }
         drop(chunk_dir);
     });
 }
 
-fn merge_chunks<K>(
+#[allow(dead_code)]
+fn merge_chunks_by_naive_picking<K>(
     chunks: Vec<FileChunk<K>>,
     mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
 ) -> Result<()>
@@ -307,7 +315,7 @@ where
 
     let mut chunk_iters = chunks
         .into_iter()
-        .map(|chunk| Ok(chunk.iter(1 << 20)?.peekable()))
+        .map(|chunk| Ok(chunk.iter()?.peekable()))
         .collect::<Result<Vec<_>>>()?;
 
     loop {
@@ -352,6 +360,96 @@ where
         if found_ranout {
             // remove ran-out iterators
             chunk_iters.retain_mut(|it| it.peek().is_some());
+        }
+    }
+
+    for path in tmp_file_paths {
+        if std::fs::remove_file(&path).is_err() {
+            warn!("Failed to remove file: {:?}", path);
+        }
+    }
+
+    Ok(())
+}
+
+struct HeapItem<K: Ord> {
+    key: K,
+    iter_idx: usize,
+    value: Vec<u8>,
+}
+
+impl<K: Ord> Ord for HeapItem<K> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.key.cmp(&self.key)
+    }
+}
+
+impl<K: Ord> PartialOrd for HeapItem<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<K: Ord> Eq for HeapItem<K> {}
+
+impl<K: Ord> PartialEq for HeapItem<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+#[allow(dead_code)]
+fn merge_chunks_with_binary_heap<K>(
+    chunks: Vec<FileChunk<K>>,
+    mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
+) -> Result<()>
+where
+    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+{
+    let tmp_file_paths = chunks
+        .iter()
+        .map(|chunk| chunk.path().to_owned())
+        .collect::<Vec<_>>();
+
+    let mut heap = BinaryHeap::with_capacity(chunks.len());
+
+    let mut chunk_iters = chunks
+        .into_iter()
+        .map(|chunk| chunk.iter())
+        .collect::<Result<Vec<_>>>()?;
+
+    for (idx, iter) in chunk_iters.iter_mut().enumerate() {
+        match iter.next() {
+            Some(Ok((key, value))) => heap.push(HeapItem {
+                key,
+                value,
+                iter_idx: idx,
+            }),
+            None => {}
+            Some(Err(e)) => {
+                return Err(e);
+            }
+        }
+    }
+
+    loop {
+        let Some(&HeapItem { iter_idx, .. }) = heap.peek() else {
+            break;
+        };
+
+        match chunk_iters[iter_idx].next() {
+            Some(Ok((key, value))) => {
+                let mut head = heap.peek_mut().expect("must not be none");
+                add_fn((head.key, std::mem::replace(&mut head.value, value)))?;
+                head.key = key;
+            }
+            None => {
+                let HeapItem { key, value, .. } = heap.pop().expect("must not be none");
+                add_fn((key, value))?;
+            }
+            Some(Err(e)) => {
+                return Err(e);
+            }
         }
     }
 
