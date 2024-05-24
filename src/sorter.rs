@@ -1,8 +1,11 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::{
+    error::Error,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use bytemuck::Pod;
 use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
-use log::{debug, warn};
+use log::debug;
 
 use crate::{
     chunk::{FileChunk, FileChunkDir, MemChunk},
@@ -41,7 +44,7 @@ impl SortConfig {
         self.canceled.clone()
     }
 
-    pub(crate) fn ensure_not_canceled(&self) -> Result<()> {
+    pub(crate) fn ensure_not_canceled<E>(&self) -> Result<(), E> {
         if self.canceled.load(std::sync::atomic::Ordering::Relaxed) {
             Err(crate::Error::Canceled)
         } else {
@@ -74,12 +77,13 @@ impl SortConfig {
     }
 }
 
-pub fn sort<K>(
-    source: impl Iterator<Item = (K, Vec<u8>)> + Send,
+pub fn sort<K, E>(
+    source: impl Iterator<Item = std::result::Result<(K, Vec<u8>), E>> + Send,
     config: SortConfig,
-) -> SortedIter<K>
+) -> SortedIter<K, E>
 where
     K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    E: Error + Send + 'static,
 {
     let (output_tx, output_rx) = bounded(config.concurrency * 16);
     let chunk_dir = match FileChunkDir::<K>::new() {
@@ -107,16 +111,16 @@ where
     SortedIter::new(output_rx, Some(chunk_dir))
 }
 
-pub struct SortedIter<K: Pod> {
-    output_rx: Receiver<Result<(K, Vec<u8>)>>,
+pub struct SortedIter<K: Pod, E> {
+    output_rx: Receiver<Result<(K, Vec<u8>), E>>,
     done: bool,
     #[allow(dead_code)]
     chunk_dir: Option<Arc<FileChunkDir<K>>>,
 }
 
-impl<K: Pod> SortedIter<K> {
+impl<K: Pod, E> SortedIter<K, E> {
     fn new(
-        output_rx: Receiver<Result<(K, Vec<u8>)>>,
+        output_rx: Receiver<Result<(K, Vec<u8>), E>>,
         chunk_dir: Option<Arc<FileChunkDir<K>>>,
     ) -> Self {
         SortedIter {
@@ -127,8 +131,8 @@ impl<K: Pod> SortedIter<K> {
     }
 }
 
-impl<K: Pod> Iterator for SortedIter<K> {
-    type Item = Result<(K, Vec<u8>)>;
+impl<K: Pod, E> Iterator for SortedIter<K, E> {
+    type Item = Result<(K, Vec<u8>), E>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -148,13 +152,24 @@ impl<K: Pod> Iterator for SortedIter<K> {
     }
 }
 
-fn start_sorting_stage<K>(
-    config: &SortConfig,
-    source: impl Iterator<Item = (K, Vec<u8>)> + Send,
+fn mem_to_file_chunk<K: Pod + Ord, E>(
+    buffer: Vec<(K, Vec<u8>)>,
     chunk_dir: Arc<FileChunkDir<K>>,
-    chunk_tx: Sender<Result<FileChunk<K>>>,
+) -> Result<FileChunk<K>, E> {
+    let mem_chunk = MemChunk::from_unsorted(buffer);
+    let mut file_chunk = chunk_dir.add_chunk()?;
+    mem_chunk.write_to_file(&mut file_chunk)?;
+    Ok(file_chunk.finalize())
+}
+
+fn start_sorting_stage<K, E>(
+    config: &SortConfig,
+    source: impl Iterator<Item = std::result::Result<(K, Vec<u8>), E>> + Send,
+    chunk_dir: Arc<FileChunkDir<K>>,
+    chunk_tx: Sender<Result<FileChunk<K>, E>>,
 ) where
     K: Ord + Pod + Copy + Send + Sync,
+    E: Send + 'static,
 {
     debug!("Sorting stage started.");
 
@@ -163,33 +178,30 @@ fn start_sorting_stage<K>(
 
     let mut buffer = Vec::new();
 
-    fn mem_to_file_chunk<K: Pod + Ord>(
-        buffer: Vec<(K, Vec<u8>)>,
-        chunk_dir: Arc<FileChunkDir<K>>,
-    ) -> Result<FileChunk<K>> {
-        let mem_chunk = MemChunk::from_unsorted(buffer);
-        let mut file_chunk = chunk_dir.add_chunk()?;
-        mem_chunk.write_to_file(&mut file_chunk)?;
-        Ok(file_chunk.finalize())
-    }
-
-    for (key, value) in source {
-        let item_size = item_header_size + value.len();
-        if chunk_size + item_size >= config.max_chunk_bytes {
-            let buffer = std::mem::take(&mut buffer);
-            let chunk_dir = chunk_dir.clone();
-            let chunk_tx = chunk_tx.clone();
-            if let Err(e) = config.ensure_not_canceled() {
-                let _ = chunk_tx.send(Err(e));
-                return;
+    for res in source {
+        match res {
+            Ok((key, value)) => {
+                let item_size = item_header_size + value.len();
+                if chunk_size + item_size >= config.max_chunk_bytes {
+                    let buffer = std::mem::take(&mut buffer);
+                    let chunk_dir = chunk_dir.clone();
+                    let chunk_tx = chunk_tx.clone();
+                    if let Err(e) = config.ensure_not_canceled() {
+                        let _ = chunk_tx.send(Err(e));
+                        return;
+                    }
+                    rayon::spawn(move || {
+                        let _ = chunk_tx.send(mem_to_file_chunk(buffer, chunk_dir));
+                    });
+                    chunk_size = 0;
+                }
+                chunk_size += item_size;
+                buffer.push((key, value));
             }
-            rayon::spawn(move || {
-                let _ = chunk_tx.send(mem_to_file_chunk(buffer, chunk_dir));
-            });
-            chunk_size = 0;
+            Err(e) => {
+                let _ = chunk_tx.send(Err(crate::Error::Source(e)));
+            }
         }
-        chunk_size += item_size;
-        buffer.push((key, value));
     }
 
     // last chunk
@@ -204,17 +216,18 @@ fn start_sorting_stage<K>(
     }
 }
 
-fn start_merging_stage<K>(
+fn start_merging_stage<K, E>(
     config: &SortConfig,
-    chunk_rx: Receiver<Result<FileChunk<K>>>,
+    chunk_rx: Receiver<Result<FileChunk<K>, E>>,
     chunk_dir: Arc<FileChunkDir<K>>,
-    output_tx: Sender<Result<(K, Vec<u8>)>>,
+    output_tx: Sender<Result<(K, Vec<u8>), E>>,
 ) where
     K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    E: Send + 'static,
 {
     debug!("Merging stage started.");
 
-    let (merged_tx, merged_rx) = unbounded::<Result<FileChunk<K>>>();
+    let (merged_tx, merged_rx) = unbounded::<Result<FileChunk<K>, E>>();
     let mut pending = Vec::new();
     let mut source_finished = false;
     let mut num_running_merges = 0;

@@ -6,14 +6,14 @@ use std::{
 use bytemuck::Pod;
 use log::warn;
 
-use crate::{chunk::FileChunk, Result, SortConfig};
+use crate::{chunk::FileChunk, Result};
 
 #[allow(dead_code)]
-pub fn merge_chunks_by_naive_picking<K>(
+pub fn merge_chunks_by_naive_picking<K, E>(
     canceled: Arc<AtomicBool>,
     chunks: Vec<FileChunk<K>>,
-    mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
-) -> Result<()>
+    mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<(), E>,
+) -> Result<(), E>
 where
     K: Ord + Pod + Copy + Send + Sync,
 {
@@ -25,7 +25,7 @@ where
     let mut chunk_iters = chunks
         .into_iter()
         .map(|chunk| Ok(chunk.iter()?.peekable()))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, E>>()?;
 
     loop {
         let mut min_key = None;
@@ -114,11 +114,11 @@ impl<K: Ord> PartialEq for HeapItem<K> {
     }
 }
 
-pub fn merge_chunks_with_binary_heap<K>(
+pub fn merge_chunks_with_binary_heap<K, E>(
     canceled: Arc<AtomicBool>,
     chunks: Vec<FileChunk<K>>,
-    mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
-) -> Result<()>
+    mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<(), E>,
+) -> Result<(), E>
 where
     K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
 {
@@ -132,7 +132,7 @@ where
     let mut chunk_iters = chunks
         .into_iter()
         .map(|chunk| chunk.iter())
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, E>>()?;
 
     for (idx, iter) in chunk_iters.iter_mut().enumerate() {
         match iter.next() {

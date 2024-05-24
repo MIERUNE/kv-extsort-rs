@@ -68,14 +68,14 @@ use log::{debug, error};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{convert::Infallible, time::Instant};
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Infallible> {
     env_logger::init();
 
     let merge_k = 16;
     let size = 2_000_000;
     let body_size = 2046;
     let concurrency = num_cpus::get();
-    let max_chunk_size = 64 * 1024 * 1024;
+    let max_chunk_size = 256 * 1024 * 1024;
 
     let make_iter = || {
         let mut rng = SmallRng::from_entropy();
@@ -159,7 +159,7 @@ fn main() -> Result<()> {
 
         let mut prev_key = None;
         let mut count = 0;
-        for res in kv_extsort::sort(make_iter(), config) {
+        for res in kv_extsort::sort(make_iter().map(Result::<_, Infallible>::Ok), config) {
             match res {
                 Ok((_key, _value)) => {
                     // validate if sorted
