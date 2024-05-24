@@ -155,9 +155,9 @@ where
         &self.path
     }
 
-    pub fn iter(&self, capacity: usize) -> Result<FileChunkIter<K>> {
+    pub fn iter(&self) -> Result<FileChunkIter<K>> {
         let file = File::open(&self.path)?;
-        let reader = BufReader::with_capacity(capacity, file);
+        let reader = BufReader::with_capacity(1 << 20, file);
         Ok(FileChunkIter {
             reader,
             key_type: PhantomData,
