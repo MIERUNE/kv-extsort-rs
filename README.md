@@ -8,5 +8,5 @@ Work in progress.
 
 - [x] Limiting memory usage
 - [x] Multi-threading
-- [ ] Cancellation
+- [x] Cancellation
 - [ ] Asnyc I/O
