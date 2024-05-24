@@ -1,4 +1,5 @@
 mod chunk;
+mod merge;
 mod sorter;
 
 pub use sorter::{sort, SortConfig};

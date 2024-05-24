@@ -1,7 +1,4 @@
-use std::{
-    collections::BinaryHeap,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use bytemuck::Pod;
 use crossbeam_channel::{bounded, unbounded, Receiver, Select, Sender};
@@ -9,6 +6,7 @@ use log::{debug, warn};
 
 use crate::{
     chunk::{FileChunk, FileChunkDir, MemChunk},
+    merge::merge_chunks_with_binary_heap,
     Result,
 };
 
@@ -360,96 +358,6 @@ where
         if found_ranout {
             // remove ran-out iterators
             chunk_iters.retain_mut(|it| it.peek().is_some());
-        }
-    }
-
-    for path in tmp_file_paths {
-        if std::fs::remove_file(&path).is_err() {
-            warn!("Failed to remove file: {:?}", path);
-        }
-    }
-
-    Ok(())
-}
-
-struct HeapItem<K: Ord> {
-    key: K,
-    iter_idx: usize,
-    value: Vec<u8>,
-}
-
-impl<K: Ord> Ord for HeapItem<K> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.key.cmp(&self.key)
-    }
-}
-
-impl<K: Ord> PartialOrd for HeapItem<K> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<K: Ord> Eq for HeapItem<K> {}
-
-impl<K: Ord> PartialEq for HeapItem<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-    }
-}
-
-#[allow(dead_code)]
-fn merge_chunks_with_binary_heap<K>(
-    chunks: Vec<FileChunk<K>>,
-    mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<()>,
-) -> Result<()>
-where
-    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
-{
-    let tmp_file_paths = chunks
-        .iter()
-        .map(|chunk| chunk.path().to_owned())
-        .collect::<Vec<_>>();
-
-    let mut heap = BinaryHeap::with_capacity(chunks.len());
-
-    let mut chunk_iters = chunks
-        .into_iter()
-        .map(|chunk| chunk.iter())
-        .collect::<Result<Vec<_>>>()?;
-
-    for (idx, iter) in chunk_iters.iter_mut().enumerate() {
-        match iter.next() {
-            Some(Ok((key, value))) => heap.push(HeapItem {
-                key,
-                value,
-                iter_idx: idx,
-            }),
-            None => {}
-            Some(Err(e)) => {
-                return Err(e);
-            }
-        }
-    }
-
-    loop {
-        let Some(&HeapItem { iter_idx, .. }) = heap.peek() else {
-            break;
-        };
-
-        match chunk_iters[iter_idx].next() {
-            Some(Ok((key, value))) => {
-                let mut head = heap.peek_mut().expect("must not be none");
-                add_fn((head.key, std::mem::replace(&mut head.value, value)))?;
-                head.key = key;
-            }
-            None => {
-                let HeapItem { key, value, .. } = heap.pop().expect("must not be none");
-                add_fn((key, value))?;
-            }
-            Some(Err(e)) => {
-                return Err(e);
-            }
         }
     }
 
