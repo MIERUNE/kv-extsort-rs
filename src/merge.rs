@@ -120,7 +120,7 @@ pub fn merge_chunks_with_binary_heap<K, E>(
     mut add_fn: impl FnMut((K, Vec<u8>)) -> Result<(), E>,
 ) -> Result<(), E>
 where
-    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    K: Ord + Pod + Copy + Send + Sync,
 {
     let tmp_file_paths = chunks
         .iter()

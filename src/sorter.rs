@@ -23,7 +23,7 @@ pub struct SortConfig {
 impl Default for SortConfig {
     fn default() -> Self {
         Self {
-            max_chunk_bytes: 1 << 30,
+            max_chunk_bytes: 512 * 1024 * 1024,
             concurrency: 8,
             merge_k: 16,
             canceled: Arc::new(AtomicBool::new(false)),
@@ -82,7 +82,7 @@ pub fn sort<K, E>(
     config: SortConfig,
 ) -> SortedIter<K, E>
 where
-    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    K: Ord + Pod + Copy + Send + Sync,
     E: Error + Send + 'static,
 {
     let (output_tx, output_rx) = bounded(config.concurrency * 16);
@@ -222,7 +222,7 @@ fn start_merging_stage<K, E>(
     chunk_dir: Arc<FileChunkDir<K>>,
     output_tx: Sender<Result<(K, Vec<u8>), E>>,
 ) where
-    K: Ord + Pod + Copy + Send + Sync + std::fmt::Debug,
+    K: Ord + Pod + Copy + Send + Sync,
     E: Send + 'static,
 {
     debug!("Merging stage started.");
@@ -328,8 +328,12 @@ fn start_merging_stage<K, E>(
         });
     }
 
-    debug!("Start iteration by merging {} chunks", pending.len());
     let canceled = config.canceled.clone();
+    if canceled.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    debug!("Start iteration by merging {} chunks", pending.len());
     rayon::spawn(move || {
         if let Err(e) = merge_chunks_with_binary_heap(canceled, pending, |(key, value)| {
             let _ = output_tx.send(Ok((key, value)));
