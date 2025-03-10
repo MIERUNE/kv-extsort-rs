@@ -1,6 +1,6 @@
 # kv-extsort-rs
 
-[![codecov](https://codecov.io/gh/MIERUNE/kv-extsort-rs/graph/badge.svg?token=y26WUxnRGu)](https://codecov.io/gh/MIERUNE/kv-extsort-rs)
+[![codecov](https://codecov.io/gh/ciscorn/kv-extsort-rs/graph/badge.svg?token=y26WUxnRGu)](https://codecov.io/gh/ciscorn/kv-extsort-rs)
 
 A simple external sort library for key-value datasets.
 
@@ -13,8 +13,6 @@ Work in progress.
 - [x] Cancellation
 - [ ] Asnyc I/O
 
-## Authors
+## Author
 
-- MIERUNE Inc.
-- Taku Fukada ([@ciscorn](https://github.com/ciscorn)) - original author
-
+Taku Fukada ([@ciscorn](https://github.com/ciscorn)) - original author
